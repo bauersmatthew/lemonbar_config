@@ -27,8 +27,6 @@ for wininfo in infosplits:
     char = winclass[0]
     if winclass in icon_table:
         char = icon_table[winclass]
-    else:
-        sys.stderr.write(char)
     active = (winid == sys.argv[2])
     out  = '%{{A1:xdotool windowactivate {id}:}}'.format(id=winid)
     out += '%{{A3:xdotool windowminimize {id}:}}'.format(id=winid)
