@@ -27,7 +27,7 @@ for wininfo in infosplits:
     char = winclass[0]
     if winclass in icon_table:
         char = icon_table[winclass]
-    active = (winid == sys.argv[2])
+    active = (len(sys.argv) >= 3 and winid == sys.argv[2])
     out  = '%{{A1:xdotool windowactivate {id}:}}'.format(id=winid)
     out += '%{{A3:xdotool windowminimize {id}:}}'.format(id=winid)
     out += SPACING_HALF
