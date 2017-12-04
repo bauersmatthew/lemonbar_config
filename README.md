@@ -1,1 +1,1 @@
-run_lemonbar.sh is the main script; the .py files are all called by it.
+run_lemonbar.py is the main file.
