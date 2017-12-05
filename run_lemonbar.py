@@ -7,20 +7,47 @@ import time
 SPACING="          "
 SPACING_HALF="     "
 
+class Renderer:
+    """Base class for all bar renderers."""
+    def __init__(self, fun):
+        self.fun = fun
+        self.cached = None
+
+    def update(self):
+        """Will update the cached value."""
+        self.cached = self.fun()
+
+    def render(self):
+        """Will get a cached value if available."""
+        if self.cached is None:
+            self.update()
+        return self.cached
+
+renderers = {}
+def register(name):
+    def wrap(fun):
+        renderers[name] = Renderer(fun)
+        return fun
+    return wrap
+
+def render(name):
+    return renderers[name].render()
+def update(name):
+    renderers[name].update()
+
 def get_real_windows():
     """Get dictionary of normal window IDS -> window classes."""
     real_windows = {} # id -> class
-    with Popen('xdotool search .'.split(), stdout=PIPE, stderr=PIPE) as xdt_proc:
-        for line in xdt_proc.stdout:
-            winid = line.decode('utf8').strip()
-            xprop_cmd = 'xprop -id {} _OB_APP_TYPE _OB_APP_CLASS'.format(winid)
-            with Popen(xprop_cmd.split(), stdout=PIPE) as xprop_proc:
-                xprop_lines = xprop_proc.stdout.read().decode('utf8').split('\n')
-                if 'normal' in xprop_lines[0]:
-                    real_windows[winid] = ' '.join(
-                        xprop_lines[1].split(' ')[2:]).strip('"')
+    with Popen('wmctrl -xl'.split(), stdout=PIPE, stderr=PIPE) as proc:
+        for line in proc.stdout:
+            fields = line.split()
+            winid = str(int(fields[0].decode('utf8').strip(), 16))
+            winclass = fields[2].decode('utf8').split('.')[1]
+            if fields[1].decode('utf8') != '-1': # not a bar
+                real_windows[winid] = winclass
     return real_windows
 
+@register('apps')
 def render_apps():
     """Render the taskbar-like section of the bar."""
     windows = get_real_windows()
@@ -52,10 +79,12 @@ def render_apps():
         total_out += out
     return total_out
 
+@register('clock')
 def render_clock():
     """Render the time."""
     return datetime.now().strftime('%l:%M').strip()
 
+@register('battery')
 def render_battery():
     """Render the battery level."""
     warning = False
@@ -84,6 +113,7 @@ def render_battery():
         out += '\uf240' # 4/4 battery
     return out
 
+@register('brightness')
 def render_brightness():
     """Render the screen brightness."""
     bright_max = None
@@ -99,6 +129,7 @@ def render_brightness():
         return '\uf123' # half-full star
     return '\uf005' # full star
 
+@register('volume')
 def render_volume():
     """Render the volume level."""
     info_all = None
@@ -117,6 +148,7 @@ def render_volume():
         return '\uf027' # low speaker
     return '\uf028' # high speaker
 
+@register('network')
 def render_network():
     """Render the network connectivity status."""
     status = None
@@ -133,12 +165,12 @@ def render_all():
         '%{{c}}{clock}%'
         '{{r}}{network}{s}{volume}{s}{brightness}{s}{battery}{s}\n'
     ).format(s=SPACING,
-             apps=render_apps(),
-             clock=render_clock(),
-             network=render_network(),
-             volume=render_volume(),
-             brightness=render_brightness(),
-             battery=render_battery())
+             apps=render('apps'),
+             clock=render('clock'),
+             network=render('network'),
+             volume=render('volume'),
+             brightness=render('brightness'),
+             battery=render('battery'))
 
 def update_bar(bar_process):
     """Re-render and update the bar."""
@@ -152,8 +184,13 @@ class HeartbeatThread(threading.Thread):
         self.bar = bar_process
         self.stop = False
 
+    def update_all(self):
+        for name in renderers:
+            update(name)
+
     def run(self):
         while not self.stop:
+            self.update_all()
             update_bar(self.bar)
             time.sleep(2) # sleep for .5 seconds
 
@@ -174,6 +211,7 @@ def main():
         for line in proc.stdout:
             # each line is a command to run
             Popen(line.strip(), shell=True).wait()
+            update('apps')
             update_bar(proc)
         heartbeat.stop()
 
