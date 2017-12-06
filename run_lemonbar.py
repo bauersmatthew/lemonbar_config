@@ -3,6 +3,12 @@ from subprocess import Popen, PIPE
 from datetime import datetime
 import threading
 import time
+import argparse
+import fcntl
+import os
+import os.path
+import sys
+import signal
 
 SPACING="          "
 SPACING_HALF="     "
@@ -197,9 +203,86 @@ class HeartbeatThread(threading.Thread):
     def stop(self):
         self.stop = True
 
-def main():
+COMMUNICATION_FILE = os.path.expanduser('~/.cyanbar_pipeinst')
+class ListenerThread(threading.Thread):
+    """The thread that listens to the COMMUNICATION_FILE for commands."""
+    def __init__(self, bar_proc):
+        threading.Thread.__init__(self)
+        self.setDaemon(True)
+        self.stop = False
+        self.bar = bar_proc
+
+    def make_pipeinst(self):
+        """Make the pipe file a blank file."""
+        with open(COMMUNICATION_FILE, 'w') as fout:
+            pass
+
+    def process_command(self, cmd):
+        """Process a command."""
+        cmd = cmd.strip()
+        try:
+            update(cmd)
+            update_bar(self.bar)
+        except Exception as e:
+            pass
+
+    def run(self):
+        """Continuously listen for commands."""
+        self.make_pipeinst()
+        with open(COMMUNICATION_FILE, 'r+') as fin:
+            while not self.stop:
+                where = fin.tell()
+                line = fin.readline()
+                if not line:
+                    time.sleep(.05)
+                    fin.seek(where)
+                else:
+                    # line/command was recieved
+                    self.process_command(line)
+
+PID_FILE = os.path.expanduser('~/.cyanbar.pid')
+LOCK_FILE = os.path.expanduser('~/.cyanbar.lock')
+def acquire_lock():
+    """Try to get a lock on the LOCK_FILE. Return None on failure."""
+    fp = open(LOCK_FILE, 'w')
+    try:
+        fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fp
+    except IOError:
+        # another instance is running
+        fp.close()
+        return None
+
+def test_locked():
+    """Test if the LOCK_FILE is locked. Return True if locked."""
+    fp = open(LOCK_FILE, 'w')
+    try:
+        fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False # automatically unlocks
+    except IOError:
+        # another instance is running
+        return True
+    finally:
+        fp.close() # this is redundant anyway I think
+
+def save_pid():
+    """Save current PID to the PID_FILE."""
+    with open(PID_FILE, 'w') as fout:
+        fout.write(str(os.getpid()))
+def read_pid():
+    """Load the PID from file."""
+    with open(PID_FILE, 'r') as fin:
+        return int(fin.read())
+                    
+def do_run():
     """Main routine."""
     # open lemonbar
+    lock_fp = acquire_lock()
+    if lock_fp is None:
+        # we are not unique
+        sys.stderr.write('Another cyanbar process is already running!\n')
+        return 1
+    save_pid()
     lemonbar_cmd = ('lemonbar '
                     '-o 0 -f noto:size=22 -o -2 -f fontawesome:size=22 '
                     '-B #ff2a2a2a -F #ffeeeeee '
@@ -207,13 +290,59 @@ def main():
     with Popen(lemonbar_cmd.split(), stdout=PIPE, stdin=PIPE,
                bufsize=1, universal_newlines=True) as proc:
         heartbeat = HeartbeatThread(proc)
+        listener = ListenerThread(proc)
         heartbeat.start()
+        listener.start()
         for line in proc.stdout:
             # each line is a command to run
             Popen(line.strip(), shell=True).wait()
             update('apps')
             update_bar(proc)
         heartbeat.stop()
+    lock_fp.close()
+
+def do_kill():
+    """Kill the bar."""
+    if test_locked():
+        # good; something is running.
+        os.kill(read_pid(), signal.SIGKILL)
+        return 0
+    # otherwise nothing is running
+    sys.stderr.write('The cyanbar was not running.\n')
+    return 1
+
+def do_send_update(words):
+    """Send signal(s) to the bar."""
+    if test_locked():
+        # good; there's something there to listen.
+        with open(COMMUNICATION_FILE, 'a') as fout:
+            fout.write('\n'.join(words)+'\n')
+        return 0
+    sys.stderr.write('The cyanbar was not running.\n')
+    return 1
+
+def main():
+    """Parse arguments and decide main action."""
+    parser = argparse.ArgumentParser(
+        description='Run and control the bar.')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-r', '--run',
+                       action='store_true',
+                       help='Start the bar.')
+    group.add_argument('-k', '--kill',
+                       action='store_true',
+                       help='Kill the bar process.')
+    group.add_argument('-u', '--update',
+                       action='append',
+                       metavar='element',
+                       help="Update a bar element (don't wait for heartbeat).")
+    args = parser.parse_args()
+    if args.run:
+        return do_run()
+    elif args.kill:
+        return do_kill()
+    elif args.update:
+        return do_send_update(args.update)
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
