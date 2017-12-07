@@ -103,7 +103,7 @@ def render_battery():
         if 'Full' in out:
             percent = 100
         else:
-            percent = int(out.split()[3][:2])
+            percent = int(out.split()[3].strip('%,'))
     out = ''
     if charging:
         out += '\uf1e6 ' # power cord
