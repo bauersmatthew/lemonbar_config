@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from subprocess import Popen, PIPE
+import subprocess
 from datetime import datetime
 import threading
 import time
@@ -9,6 +10,8 @@ import os
 import os.path
 import sys
 import signal
+import evdev
+import string
 
 SPACING="          "
 SPACING_HALF="     "
@@ -30,6 +33,7 @@ class Renderer:
         return self.cached
 
 renderers = {}
+hidden = {}
 def register(name):
     def wrap(fun):
         renderers[name] = Renderer(fun)
@@ -37,9 +41,18 @@ def register(name):
     return wrap
 
 def render(name):
-    return renderers[name].render()
+    if name not in hidden:
+        return renderers[name].render()
+    return ''
 def update(name):
     renderers[name].update()
+def hide(name):
+    global hidden
+    hidden[name] = True
+def unhide(name):
+    global hidden
+    if name in hidden:
+        del hidden[name]
 
 def get_real_windows():
     """Get dictionary of normal window IDS -> window classes."""
@@ -167,11 +180,12 @@ def render_network():
 def render_all():
     """Render the entire bar."""
     return (
-        '%{{l}}{s}{apps}'
+        '%{{l}}{s}{apps}{launcher}'
         '%{{c}}{clock}%'
         '{{r}}{network}{s}{volume}{s}{brightness}{s}{battery}{s}\n'
     ).format(s=SPACING,
              apps=render('apps'),
+             launcher=render('launcher'),
              clock=render('clock'),
              network=render('network'),
              volume=render('volume'),
@@ -188,20 +202,21 @@ class HeartbeatThread(threading.Thread):
         threading.Thread.__init__(self)
         self.setDaemon(True)
         self.bar = bar_process
-        self.stop = False
+        self.do_stop = False
 
     def update_all(self):
         for name in renderers:
-            update(name)
+            if name != 'launcher':
+                update(name)
 
     def run(self):
-        while not self.stop:
+        while not self.do_stop:
             self.update_all()
             update_bar(self.bar)
-            time.sleep(2) # sleep for .5 seconds
+            time.sleep(2)
 
     def stop(self):
-        self.stop = True
+        self.do_stop = True
 
 COMMUNICATION_FILE = os.path.expanduser('~/.cyanbar_pipeinst')
 class ListenerThread(threading.Thread):
@@ -240,6 +255,161 @@ class ListenerThread(threading.Thread):
                     # line/command was recieved
                     self.process_command(line)
 
+class LauncherRenderer:
+    """The thread that reads the input when typing in an app command."""
+    def __init__(self, bar_process):
+        self.bar = bar_process
+        self.tt_digits_shift = {
+            '1':'!','2':'@','3':'#','4':'$','5':'%','6':'^','7':'&','8':'*',
+            '9':'(','0':')'}
+        self.tt_misc = {
+            'GRAVE':'`','MINUS':'-','EQUAL':'=','LEFTBRACE':'[','RIGHTBRACE':']',
+            'BACKSLASH':'\\','COMMA':',','DOT':'.','SLASH':'/',
+            'SEMICOLON':';','APOSTROPHE':'\'','SPACE':' '}
+        self.tt_misc_shift = {
+            'GRAVE':'~','MINUS':'_','EQUAL':'+','LEFTBRACE':'{','RIGHTBRACE':'}',
+            'BACKSLASH':'|','COMMA':'<','DOT':'>','SLASH':'?',
+            'SEMICOLON':':','APOSTROPHE':'"','SPACE':' '}
+        self.find_bar_winid()
+        self.activated = False
+
+    def find_bar_winid(self):
+        """Find the X11 ID of the lemonbar."""
+        time.sleep(2)
+        for line in subprocess.run(
+                'wmctrl -l'.split(), stdout=PIPE).stdout.strip().split(b'\n'):
+            fields = line.strip().split()
+            if fields[-1] == b'bar' and fields[1] == b'-1':
+                self.rootid = fields[0].decode('utf8')
+                break
+
+    def kc_to_text(self, kc):
+        """(try to) Convert a stripped keycode to text."""
+        if kc in string.ascii_uppercase:
+            if self.shifted:
+                return kc
+            return kc.lower()
+        elif kc in string.digits:
+            if self.shifted:
+                return self.tt_digits_shift[kc]
+            return kc
+        elif kc in self.tt_misc:
+            if self.shifted:
+                return self.tt_misc_shift[kc]
+            return self.tt_misc[kc]
+        return None # not a printable, maybe...
+
+    def process_key_event(self, ev):
+        """Process a key event."""
+        kc = ev.keycode.split('_')[1]
+        char = self.kc_to_text(kc)
+        if char is not None:
+            if ev.keystate == ev.key_down:
+                # it was a down-press character
+                self.text += char
+        else:
+            # it wasn't a character.
+            if kc in ('LEFTSHIFT', 'RIGHTSHIFT'):
+                if ev.keystate != ev.key_hold:
+                    self.shifted = not self.shifted
+            elif kc == 'ENTER':
+                self.submit()
+                self.stop()
+            elif kc == 'ESC':
+                self.stop()
+            elif kc == 'BACKSPACE':
+                if ev.keystate != ev.key_up:
+                    self.text = self.text[:-1]
+            elif kc == 'TAB':
+                if ev.keystate == ev.key_down:
+                    self.autocomplete()
+
+    def autocomplete(self):
+        """Try to autocomplete the text."""
+        def ac(x, y=None):
+            if y is None:
+                y = x
+            if x.startswith(self.text):
+                self.text = y
+        ac('firefox')
+        ac('urxvt')
+        ac('lilyterm', 'urxvt')
+        ac('emacs')
+
+    def submit(self):
+        """Submit the entered text."""
+        # unix double-fork
+        pid = os.fork()
+        if pid > 0:
+            return
+        # IN FIRST CHILD
+        os.setsid()
+        pid = os.fork()
+        if pid > 0:
+            # IN SECOND PARENT
+            sys.exit(0)
+        # IN SECOND CHILD; call process
+        subprocess.run(self.text, shell=True)
+        os._exit(os.EX_OK)
+
+    def disable_input(self):
+        """(effectively) Disable input through X11 to all windows."""
+        # capture currently active ID
+        activewindow = subprocess.run('xdotool getactivewindow'.split(),
+                                        stdout=PIPE).stdout
+        if activewindow:
+            self.return_to = int(activewindow)
+        else:
+            self.return_to = None
+        # lol, switch to the bar... not the best method maybe...
+        subprocess.run('xdotool windowactivate {}'.format(self.rootid).split(),
+                       stdout=PIPE, stdin=PIPE)
+
+    def enable_input(self):
+        """(effectively) Re-enable input through X11."""
+        if self.return_to is not None:
+            subprocess.run(
+                'xdotool windowactivate {}'.format(self.return_to).split())
+
+    def run(self):
+        """Thread loop."""
+        kbd = evdev.InputDevice('/dev/input/event3') # event3 = keyboard
+        hide('apps')
+        self.activated = True
+        self.disable_input()
+        update_bar(self.bar)
+        for event in kbd.read_loop():
+            if self.do_stop:
+                break
+            if event.type == evdev.ecodes.EV_KEY:
+                event = evdev.categorize(event)
+                self.process_key_event(event)
+                update_bar(self.bar)
+        self.activated = False
+        self.enable_input()
+        unhide('apps')
+        update_bar(self.bar)
+        time.sleep(.5)
+        update('apps')
+        update_bar(self.bar)
+
+    def stop(self):
+        self.do_stop = True
+
+    # Renderer-like functions
+    def update(self):
+        self.text = ''
+        self.shifted = False
+        self.do_stop = False
+        self.thread = threading.Thread(target=self.run)
+        self.thread.run()
+
+    def render(self):
+        if self.activated:
+            return '%{{T3}}%{{B#bd5a4e}}  >  %{{B-}}  {}%{{T-}}'.format(
+                self.text)
+        return ''
+
 PID_FILE = os.path.expanduser('~/.cyanbar.pid')
 LOCK_FILE = os.path.expanduser('~/.cyanbar.lock')
 def acquire_lock():
@@ -276,6 +446,7 @@ def read_pid():
                     
 def do_run():
     """Main routine."""
+    global renderers
     # open lemonbar
     lock_fp = acquire_lock()
     if lock_fp is None:
@@ -284,13 +455,14 @@ def do_run():
         return 1
     save_pid()
     lemonbar_cmd = ('lemonbar '
-                    '-o 0 -f noto:size=22 -o -2 -f fontawesome:size=22 '
+                    '-o 0 -f noto:size=22 -o -2 -f fontawesome:size=22 -f notomono:size=22 '
                     '-B #ff2a2a2a -F #ffeeeeee '
                     '-g 3200x50')
     with Popen(lemonbar_cmd.split(), stdout=PIPE, stdin=PIPE,
                bufsize=1, universal_newlines=True) as proc:
         heartbeat = HeartbeatThread(proc)
         listener = ListenerThread(proc)
+        renderers['launcher'] = LauncherRenderer(proc)
         heartbeat.start()
         listener.start()
         for line in proc.stdout:
