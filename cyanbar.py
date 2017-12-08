@@ -159,7 +159,7 @@ def render_volume():
             info = line.strip().split()
             break
     percent = int(info[4][1:-2])
-    status = 'on' in info[4]
+    status = 'on' in info[5]
     if not status or percent == 0:
         return '\uf026' # muted
     if percent < 50:
