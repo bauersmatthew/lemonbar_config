@@ -106,22 +106,21 @@ def render_clock():
 @register('battery')
 def render_battery():
     """Render the battery level."""
-    warning = False
-    charging = True
     percent = None
-    with Popen('acpi -b'.split(), stdout=PIPE) as proc:
-        out = proc.stdout.read().decode('utf8').strip()
-        if 'Discharging' in out:
-            charging = False
-        if 'Full' in out:
-            percent = 100
+    charging = None
+    with open('/sys/class/power_supply/BAT1/capacity') as fin:
+        percent = int(fin.read().strip())
+    with open('/sys/class/power_supply/BAT1/status') as fin:
+        if fin.read().strip() == 'Charging':
+            charging = True
         else:
-            percent = int(out.split()[3].strip('%,'))
+            charging = False
+
     out = ''
     if charging:
         out += '\uf1e6 ' # power cord
     if percent < 25:
-        out += '\uf244 ({}%)'.format(percent) # 0/4 battery
+        out += '%{{F#bd5a4e}}\uf244 ({}%)%{{F-}}'.format(percent) # 0/4 battery
     elif percent < 50:
         out += '\uf243' # 1/4 battery
     elif percent < 75:
